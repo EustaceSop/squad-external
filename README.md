@@ -1,3 +1,11 @@
 # squad-external
 
-not even working need to fix just backup
+ALL FIXED
+
+AIMBOT
+PLAYER ESP
+Vehicle ESP
+TICKET ESP
+AND MORE...
+
+Exploit havent fix yet, other functions are working
