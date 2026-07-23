@@ -274,6 +274,28 @@ IDWriteTextFormat* Renderer::GetTextFormat(int size)
 // Frame management
 // ============================================================================
 
+void Renderer::ApplyState()
+{
+    m_ctx->IASetInputLayout(m_inputLayout);
+    UINT stride = sizeof(Vertex2D);
+    UINT offset = 0;
+    m_ctx->IASetVertexBuffers(0, 1, &m_vertexBuffer, &stride, &offset);
+    m_ctx->VSSetShader(m_vs, nullptr, 0);
+    m_ctx->VSSetConstantBuffers(0, 1, &m_constantBuffer);
+    m_ctx->PSSetShader(m_ps, nullptr, 0);
+
+    float blendFactor[4] = { 0, 0, 0, 0 };
+    m_ctx->OMSetBlendState(m_blendState, blendFactor, 0xFFFFFFFF);
+    m_ctx->RSSetState(m_rastState);
+    m_ctx->OMSetDepthStencilState(m_dsState, 0);
+
+    D3D11_VIEWPORT vp = {};
+    vp.Width = (float)m_screenW;
+    vp.Height = (float)m_screenH;
+    vp.MaxDepth = 1.0f;
+    m_ctx->RSSetViewports(1, &vp);
+}
+
 void Renderer::BeginFrame()
 {
     // Update screen size
@@ -296,25 +318,7 @@ void Renderer::BeginFrame()
     }
 
     // Set pipeline state
-    m_ctx->IASetInputLayout(m_inputLayout);
-    UINT stride = sizeof(Vertex2D);
-    UINT offset = 0;
-    m_ctx->IASetVertexBuffers(0, 1, &m_vertexBuffer, &stride, &offset);
-    m_ctx->VSSetShader(m_vs, nullptr, 0);
-    m_ctx->VSSetConstantBuffers(0, 1, &m_constantBuffer);
-    m_ctx->PSSetShader(m_ps, nullptr, 0);
-
-    float blendFactor[4] = { 0, 0, 0, 0 };
-    m_ctx->OMSetBlendState(m_blendState, blendFactor, 0xFFFFFFFF);
-    m_ctx->RSSetState(m_rastState);
-    m_ctx->OMSetDepthStencilState(m_dsState, 0);
-
-    // Viewport
-    D3D11_VIEWPORT vp = {};
-    vp.Width = (float)m_screenW;
-    vp.Height = (float)m_screenH;
-    vp.MaxDepth = 1.0f;
-    m_ctx->RSSetViewports(1, &vp);
+    ApplyState();
 }
 
 void Renderer::EndFrame()
@@ -329,6 +333,9 @@ void Renderer::EndFrame()
 void Renderer::DrawVertices(const Vertex2D* verts, int count, D3D11_PRIMITIVE_TOPOLOGY topology)
 {
     if (!m_ctx || !m_vertexBuffer || count <= 0 || count > MAX_VERTICES) return;
+
+    // D2D text rendering clobbers the D3D context - restore full pipeline
+    ApplyState();
 
     D3D11_MAPPED_SUBRESOURCE mapped;
     if (SUCCEEDED(m_ctx->Map(m_vertexBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {

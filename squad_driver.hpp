@@ -1,5 +1,6 @@
 #pragma once
 #include <Windows.h>
+#include <winternl.h>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -11,21 +12,34 @@
 // ============================================================================
 // Squad Driver Interface - wraps EvoriaSharedMemorySigned for Squad
 // Multi-channel support: each thread gets its own channel
+// Protocol synced with EvoriaSharedMemorySigned (shared.h):
+//   - Section in \KernelObjects\ via NtOpenSection (not BaseNamedObjects)
+//   - BootId seed at KUSER_SHARED_DATA + 0x2C4 (ULONG, 4 bytes)
 // ============================================================================
+
+// NtOpenSection is not declared in winternl.h -- declare for lazy_importer
+extern "C" NTSTATUS NTAPI NtOpenSection(
+    PHANDLE            SectionHandle,
+    ACCESS_MASK        DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes);
+
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(x) (((NTSTATUS)(x)) >= 0)
+#endif
 
 // ---------------------------------------------------------------------------
 // Shared memory protocol (must match kernel driver)
 // ---------------------------------------------------------------------------
 
 #define KUSER_SHARED_DATA_ADDR  0x7FFE0000
-#define BOOT_ID_OFFSET          0x264
+#define BOOT_ID_OFFSET          0x2C4
 
 inline uint32_t HashBootId()
 {
-    const unsigned char* guid = (const unsigned char*)(uintptr_t)(KUSER_SHARED_DATA_ADDR + BOOT_ID_OFFSET);
+    const unsigned char* seed = (const unsigned char*)(uintptr_t)(KUSER_SHARED_DATA_ADDR + BOOT_ID_OFFSET);
     uint32_t h = 0x811C9DC5;
-    for (int i = 0; i < 16; i++) {
-        h ^= guid[i];
+    for (int i = 0; i < 4; i++) {  // BootId is 4 bytes (ULONG)
+        h ^= seed[i];
         h *= 0x01000193;
     }
     return h;
@@ -34,8 +48,9 @@ inline uint32_t HashBootId()
 inline void GenerateSectionName(wchar_t* buf, size_t bufLen)
 {
     uint32_t hash = HashBootId();
-    // Build prefix at runtime to avoid string in binary
-    auto prefix = xorstr_(L"Global\\SM0");
+    // Full NT path -- opened via NtOpenSection; Win32 Global\ prefix cannot
+    // reach the KernelObjects directory
+    auto prefix = xorstr_(L"\\KernelObjects\\PowerMonitorRequest_");
     const wchar_t hexChars[] = L"0123456789abcdef";
     size_t prefixLen = wcslen(prefix);
     if (bufLen < prefixLen + 9) return;
@@ -57,6 +72,7 @@ enum class RequestType : uint32_t {
     GetSectionBase = 6,
     SetKnownAddress = 7,
     BatchWriteMemory = 8,
+    GetStats = 9,
     Shutdown = 0xFF
 };
 
@@ -91,6 +107,19 @@ struct BatchWriteEntry {
     uint64_t address;
     uint32_t size;
     uint32_t offset;
+};
+
+// Must match kernel shared.h::DriverStats byte-for-byte
+struct DriverStats {
+    uint64_t hits_ScratchRead;
+    uint64_t hits_ScratchWrite;
+    uint64_t hits_Rejected;
+    uint64_t va_NtBase;
+    uint64_t va_MmPfnDatabase;
+    uint64_t va_MmPteBase;
+    uint64_t va_KiMtrrMaskBase;
+    uint32_t cpuCount;
+    uint32_t recreatedAvailable;
 };
 #pragma pack(pop)
 
@@ -128,13 +157,27 @@ public:
     SquadDriver& operator=(const SquadDriver&) = delete;
 
     bool connect() {
-        wchar_t name[64] = {};
-        GenerateSectionName(name, 64);
+        wchar_t name[96] = {};
+        GenerateSectionName(name, 96);
 
-        m_section = LI_FN(OpenFileMappingW)(FILE_MAP_ALL_ACCESS, FALSE, name);
-        if (!m_section) return false;
+        // Section is at \KernelObjects\ -- Win32 OpenFileMapping cannot reach
+        // that directory. Use NtOpenSection with the full NT path.
+        UNICODE_STRING sectionPath;
+        sectionPath.Buffer = name;
+        sectionPath.Length = (USHORT)(wcslen(name) * sizeof(wchar_t));
+        sectionPath.MaximumLength = (USHORT)sizeof(name);
 
-        m_base = (uint8_t*)LI_FN(MapViewOfFile)(m_section, FILE_MAP_ALL_ACCESS, 0, 0, SHARED_TOTAL_SIZE_DRV);
+        OBJECT_ATTRIBUTES objAttr;
+        InitializeObjectAttributes(&objAttr, &sectionPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+        // SECTION_MAP_WRITE (0x2) | SECTION_MAP_READ (0x4)
+        NTSTATUS status = LI_FN(NtOpenSection)(&m_section, 0x2 | 0x4, &objAttr);
+        if (!NT_SUCCESS(status) || !m_section) {
+            m_section = NULL;
+            return false;
+        }
+
+        m_base = (uint8_t*)LI_FN(MapViewOfFile)(m_section, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, SHARED_TOTAL_SIZE_DRV);
         if (!m_base) {
             LI_FN(CloseHandle)(m_section);
             m_section = NULL;
@@ -164,7 +207,7 @@ public:
     // Attach to Squad process
     // ---------------------------------------------------------------------------
     bool attach() {
-        m_pid = get_process_pid(xorstr_(L"SquadGame.exe"));
+        m_pid = get_process_pid(xorstr_(L"SquadGame-Win64-Shipping.exe"));
         if (!m_pid) return false;
 
         m_base_addr = get_section_base(m_pid);
@@ -191,7 +234,7 @@ public:
         c.header->size = size;
         c.header->type = RequestType::ReadMemory;
         c.header->result = 0;
-        MemoryBarrier();
+        _ReadWriteBarrier();
         c.header->status = RequestStatus::Pending;
 
         if (!wait_complete(c)) return false;
@@ -210,7 +253,7 @@ public:
         c.header->size = size;
         c.header->type = RequestType::WriteMemory;
         c.header->result = 0;
-        MemoryBarrier();
+        _ReadWriteBarrier();
         c.header->status = RequestStatus::Pending;
 
         return wait_complete(c);
@@ -256,7 +299,7 @@ public:
         c.header->targetPid = m_pid;
         c.header->batchCount = (uint32_t)reqs.size();
         c.header->type = RequestType::BatchReadMemory;
-        MemoryBarrier();
+        _ReadWriteBarrier();
         c.header->status = RequestStatus::Pending;
 
         if (!wait_complete(c)) return false;
@@ -297,10 +340,46 @@ public:
         c.header->targetPid = m_pid;
         c.header->batchCount = (uint32_t)reqs.size();
         c.header->type = RequestType::BatchWriteMemory;
-        MemoryBarrier();
+        _ReadWriteBarrier();
         c.header->status = RequestStatus::Pending;
 
         return wait_complete(c);
+    }
+
+    // ---------------------------------------------------------------------------
+    // GetStats -- per-read-path counters + resolved kernel addresses from the
+    // driver (see which tier of the physical read path carries traffic)
+    // ---------------------------------------------------------------------------
+    bool get_stats(DriverStats* out, int ch = 7) {
+        auto& c = m_channels[ch];
+        if (!c.header || !out) return false;
+
+        wait_idle(c);
+        c.header->type = RequestType::GetStats;
+        c.header->result = 0;
+        _ReadWriteBarrier();
+        c.header->status = RequestStatus::Pending;
+
+        if (!wait_complete(c)) return false;
+        memcpy(out, c.data, sizeof(DriverStats));
+        return true;
+    }
+
+    // Driver-side init log (everything kernel would DbgPrint at load).
+    // Text follows immediately after DriverStats in the data buffer.
+    std::string get_init_log(int ch = 7) {
+        auto& c = m_channels[ch];
+        if (!c.header) return "";
+
+        wait_idle(c);
+        c.header->type = RequestType::GetStats;
+        c.header->result = 0;
+        _ReadWriteBarrier();
+        c.header->status = RequestStatus::Pending;
+
+        if (!wait_complete(c)) return "";
+        const char* p = (const char*)(c.data + sizeof(DriverStats));
+        return std::string(p);
     }
 
     // ---------------------------------------------------------------------------
@@ -335,7 +414,7 @@ private:
         wcsncpy_s(c.header->processName, name, 63);
         c.header->type = RequestType::GetProcessPid;
         c.header->result = 0;
-        MemoryBarrier();
+        _ReadWriteBarrier();
         c.header->status = RequestStatus::Pending;
         if (!wait_complete(c)) return 0;
         return (uint32_t)c.header->result;
@@ -349,7 +428,7 @@ private:
         if (mod) wcsncpy_s(c.header->moduleName, mod, 63);
         c.header->type = RequestType::GetModuleBase;
         c.header->result = 0;
-        MemoryBarrier();
+        _ReadWriteBarrier();
         c.header->status = RequestStatus::Pending;
         if (!wait_complete(c)) return 0;
         return c.header->result;
@@ -361,7 +440,7 @@ private:
         c.header->targetPid = pid;
         c.header->type = RequestType::GetSectionBase;
         c.header->result = 0;
-        MemoryBarrier();
+        _ReadWriteBarrier();
         c.header->status = RequestStatus::Pending;
         if (!wait_complete(c)) return 0;
         return c.header->result;
@@ -371,9 +450,12 @@ private:
     // Spinlock helpers
     // ---------------------------------------------------------------------------
     void wait_idle(DriverChannel& c) {
+        // Just wait for the kernel to finish the previous request. Skipping
+        // the `= Idle` write saves a cache-line bounce (the kernel worker
+        // shares this line for polling). The kernel only reads `Pending`
+        // vs anything-else.
         while (c.header->status == RequestStatus::Pending)
             _mm_pause();
-        c.header->status = RequestStatus::Idle;
     }
 
     bool wait_complete(DriverChannel& c, uint32_t timeout_ms = 5000) {

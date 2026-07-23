@@ -63,8 +63,8 @@ struct AimbotConfig {
 
     // KMBox
     char  kmboxIp[32]   = "192.168.2.188";
-    char  kmboxPort[8]  = "";
-    char  kmboxMac[16]  = "";
+    char  kmboxPort[8]  = "2337";
+    char  kmboxMac[16]  = "09A13CAB";
     bool  kmboxConnected = false;
 };
 

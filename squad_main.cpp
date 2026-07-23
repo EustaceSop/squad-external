@@ -16,6 +16,7 @@
 #include "squad_exploit.hpp"
 #include "squad_aimbot.hpp"
 #include "squad_config.hpp"
+#include "squad_bones.hpp"
 
 // ============================================================================
 // Squad External ESP + Exploit + Aimbot
@@ -40,6 +41,17 @@ void bind_config(Config& cfg, SquadESP& esp, SquadExploit& exploit, SquadAimbot&
     cfg.bind_bool("esp.distance",   &esp.draw_distance);
     cfg.bind_bool("esp.snaplines",  &esp.draw_snaplines);
     cfg.bind_bool("esp.team_check", &esp.team_check);
+    cfg.bind_bool("esp.bot_check",  &esp.bot_check);
+    cfg.bind_bool("esp.weapon_info", &esp.draw_weapon_info);
+    cfg.bind_bool("esp.vehicles",   &esp.draw_vehicles);
+    cfg.bind_bool("esp.deployables", &esp.draw_deployables);
+    cfg.bind_bool("esp.veh_chams",  &esp.vehicle_chams);
+    cfg.bind_bool("esp.deploy_chams", &esp.deploy_chams);
+    cfg.bind_int("esp.cham_style",  &esp.cham_style);
+    cfg.bind_bool("esp.cham_fill",  &esp.cham_fill);
+    cfg.bind_bool("esp.role",       &esp.draw_role);
+    cfg.bind_bool("esp.enemy_weapon", &esp.draw_enemy_weapon);
+    cfg.bind_bool("esp.tickets",    &esp.draw_tickets);
     cfg.bind_bool("esp.debug",      &esp.draw_debug);
     cfg.bind_float("esp.max_dist",  &esp.max_distance);
     cfg.bind_color("esp.col_enemy",   &esp.col_enemy);
@@ -99,7 +111,7 @@ int main()
 {
     printf(xorstr_("============================================\n"));
     printf(xorstr_(" Squad External ESP + Exploit + Aimbot\n"));
-    printf(xorstr_(" v9.0.2 | UE 5.5.4 | Discord + KMBox\n"));
+    printf(xorstr_(" v10.5.1 | UE 5.7.4 | Discord + KMBox\n"));
     printf(xorstr_("============================================\n\n"));
 
     // --- Connect to kernel driver ---
@@ -179,6 +191,7 @@ int main()
 
     // Hitbox combo items
     const char* hitbox_items[] = { "Head", "Neck", "Chest", "Closest" };
+    const char* cham_style_items[] = { "2D", "3D" };
 
     while (g_running) {
         while (LI_FN(PeekMessageW)(&msg, overlay.hwnd(), 0, 0, PM_REMOVE)) {
@@ -202,6 +215,7 @@ int main()
         // --- Frame ---
         overlay.BeginFrame();
         g_Renderer->BeginFrame();
+        core.set_entity_labels(esp.draw_debug);
         core.update(overlay.width(), overlay.height());
 
         // --- Aimbot (runs every frame, behind menu) ---
@@ -234,10 +248,20 @@ int main()
         }
         f9Pressed = f9Down;
 
+        // --- Bone debug dump (F10) ---
+        static bool f10Pressed = false;
+        bool f10Down = (LI_FN(GetAsyncKeyState)(VK_F10) & 0x8000) != 0;
+        if (f10Down && !f10Pressed) {
+            if (bones_debug::run(drv, drv.base())) {
+                if (g_GUI) g_GUI->AddNotification(xorstr_("Bone dump -> squad_bones_debug.txt"), 2.f);
+            }
+        }
+        f10Pressed = f10Down;
+
         // --- Menu ---
         if (g_GUI->m_Open) {
             g_GUI->NewFrame();
-            g_GUI->BeginUI(100, 100, xorstr_("Squad v9.0.2"));
+            g_GUI->BeginUI(100, 100, xorstr_("Squad v10.5.1"));
 
             g_GUI->Tab(xorstr_("ESP"),      0, 5);
             g_GUI->Tab(xorstr_("Aimbot"),   1, 5);
@@ -255,6 +279,17 @@ int main()
                 g_GUI->Checkbox(xorstr_("Distance"),      xorstr_("Show distance in m"),   &esp.draw_distance);
                 g_GUI->Checkbox(xorstr_("Snaplines"),     xorstr_("Lines to feet"),        &esp.draw_snaplines);
                 g_GUI->Checkbox(xorstr_("Team Check"),    xorstr_("Only show enemies"),    &esp.team_check);
+                g_GUI->Checkbox(xorstr_("Bot Check"),     xorstr_("Hide bots (training dummies)"), &esp.bot_check);
+                g_GUI->Checkbox(xorstr_("Weapon Info"),   xorstr_("Show weapon name + ammo HUD"), &esp.draw_weapon_info);
+                g_GUI->Checkbox(xorstr_("Vehicle ESP"),   xorstr_("Show vehicles + health"),  &esp.draw_vehicles);
+                g_GUI->Checkbox(xorstr_("Vehicle Chams"), xorstr_("3D box cham for vehicles"), &esp.vehicle_chams);
+                g_GUI->Checkbox(xorstr_("Deploy ESP"),    xorstr_("Show FOBs / deployables / mines"), &esp.draw_deployables);
+                g_GUI->Checkbox(xorstr_("Deploy Chams"),  xorstr_("3D box cham for FOBs/deployables"), &esp.deploy_chams);
+                g_GUI->ComboBox(xorstr_("Box Style"),     &esp.cham_style, cham_style_items, 2);
+                g_GUI->Checkbox(xorstr_("Cham Fill"),     xorstr_("Translucent fill inside cham boxes"), &esp.cham_fill);
+                g_GUI->Checkbox(xorstr_("Role"),          xorstr_("Show player kit/role"),    &esp.draw_role);
+                g_GUI->Checkbox(xorstr_("Enemy Weapon"),  xorstr_("Show player current weapon"), &esp.draw_enemy_weapon);
+                g_GUI->Checkbox(xorstr_("Tickets"),       xorstr_("Show team tickets HUD"),   &esp.draw_tickets);
                 g_GUI->SliderFloat(xorstr_("Max Distance"), &esp.max_distance, 100.f, 3000.f, 50.f);
                 break;
 

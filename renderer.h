@@ -115,6 +115,10 @@ private:
     bool CreateTextResources();
     void DestroyTextResources();
 
+    // Re-apply the full D3D pipeline state. REQUIRED before every draw because
+    // RenderText (D2D on the shared DXGI surface) clobbers the context state.
+    void ApplyState();
+
     IDWriteTextFormat* GetTextFormat(int size);
 
     // Batch drawing
